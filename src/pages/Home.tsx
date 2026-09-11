@@ -815,7 +815,7 @@ export default function Home() {
                   }
                 }}
                 className="h-14 w-full rounded-2xl border border-white/10 bg-ink-soft px-4 text-sm text-ivory outline-none transition focus:border-copper/50"
-                placeholder="41.20B ou 71.12B,41.20A"
+                placeholder="41.20B, 71.12B, 41.20A"
               />
             </label>
 

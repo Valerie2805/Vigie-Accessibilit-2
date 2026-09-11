@@ -94,12 +94,21 @@ function splitMultiValue(value?: string) {
   }
 
   return value
-    .split(/[;,]/)
+    .split(/[;,/]|(?:\bou\b)|(?:\bor\b)/i)
     .map((item) => item.trim())
     .filter(Boolean);
 }
 
 function parseNafCodes(value?: string) {
+  if (!value?.trim()) {
+    return [];
+  }
+
+  const matchedCodes = value.match(/\b\d{2}\.\d{2}[A-Z]\b/gi);
+  if (matchedCodes && matchedCodes.length > 0) {
+    return matchedCodes.map((item) => normalizeNafCode(item));
+  }
+
   return splitMultiValue(value).map((item) => normalizeNafCode(item));
 }
 
@@ -175,7 +184,7 @@ function matchesRevenue(
   }
 
   if (revenue === null) {
-    return false;
+    return true;
   }
 
   if (minRevenue !== undefined && revenue < minRevenue) {
@@ -202,7 +211,7 @@ function matchesEmployees(
     (company.trancheEffectif && employeeRangeByTranche[company.trancheEffectif]) || null;
 
   if (!range) {
-    return false;
+    return true;
   }
 
   if (minEmployees !== undefined && range.max !== null && range.max < minEmployees) {
@@ -340,41 +349,49 @@ export async function searchCompanies(
     .join(' ')
     .trim();
 
-  try {
-    const collectedResults: CompanySearchResult[] = [];
-    const seenSirens = new Set<string>();
-    const combos = buildSearchCombos({
-      department: cleanedDepartment,
-      nafCode: cleanedNafCode,
-    });
+  const collectedResults: CompanySearchResult[] = [];
+  const seenSirens = new Set<string>();
+  const combos = buildSearchCombos({
+    department: cleanedDepartment,
+    nafCode: cleanedNafCode,
+  });
+  let hasSuccessfulRequest = false;
 
-    for (const combo of combos) {
-      for (let page = 1; page <= SEARCH_MAX_PAGES; page += 1) {
-        const payload = await fetchSearchPage({
+  for (const combo of combos) {
+    for (let page = 1; page <= SEARCH_MAX_PAGES; page += 1) {
+      let payload: SearchApiResponse;
+
+      try {
+        payload = await fetchSearchPage({
           query: combinedQuery || undefined,
           city: city?.trim() || undefined,
           department: combo.department,
           nafCode: combo.nafCode,
           page,
         });
+        hasSuccessfulRequest = true;
+      } catch {
+        break;
+      }
 
-        const pageResults = (payload.results ?? [])
-          .map(mapCompany)
-          .filter(Boolean) as CompanySearchResult[];
+      const pageResults = (payload.results ?? [])
+        .map(mapCompany)
+        .filter(Boolean) as CompanySearchResult[];
 
-        for (const company of pageResults) {
-          if (!seenSirens.has(company.siren)) {
-            seenSirens.add(company.siren);
-            collectedResults.push(company);
-          }
-        }
-
-        if (pageResults.length < SEARCH_RESULTS_PER_PAGE) {
-          break;
+      for (const company of pageResults) {
+        if (!seenSirens.has(company.siren)) {
+          seenSirens.add(company.siren);
+          collectedResults.push(company);
         }
       }
-    }
 
+      if (pageResults.length < SEARCH_RESULTS_PER_PAGE) {
+        break;
+      }
+    }
+  }
+
+  if (hasSuccessfulRequest) {
     return collectedResults
       .filter((company) => matchesCity(company, city))
       .filter((company) => matchesDepartment(company, department))
@@ -382,7 +399,9 @@ export async function searchCompanies(
       .filter((company) => matchesMetier(company, metier))
       .filter((company) => matchesRevenue(company, minRevenue, maxRevenue))
       .filter((company) => matchesEmployees(company, minEmployees, maxEmployees));
-  } catch {
+  }
+
+  {
     return demoCompanies.filter((company) => {
       const haystack = `${company.nom} ${company.siren} ${company.ville ?? ''}`.toLowerCase();
       const matchesQuery =
