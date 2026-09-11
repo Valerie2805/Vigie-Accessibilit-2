@@ -3,6 +3,28 @@ import type { CompanySearchResult } from '../types.js';
 const SEARCH_API_URL = 'https://recherche-entreprises.api.gouv.fr/search';
 const SEARCH_RESULTS_PER_PAGE = 20;
 const SEARCH_MAX_PAGES = 10;
+type CompanySizeFilter = 'tous' | 'pme' | 'ge';
+
+const activityNafCodeMap: Record<string, string[]> = {
+  banque: ['64.19Z', '64.92Z'],
+  assurance: ['65.11Z', '65.12Z', '65.20Z', '65.30Z'],
+  mutuelle: ['65.12Z', '65.20Z'],
+  'e-commerce': ['47.91A', '47.91B'],
+  transport: ['49.10Z', '49.31Z', '49.39A', '49.39B', '49.39C', '50.10Z', '50.30Z'],
+  telecommunications: ['61.10Z', '61.20Z', '61.30Z', '61.90Z'],
+  'service public': ['84.11Z', '84.12Z', '84.13Z', '84.30A', '84.30B'],
+  'mission de service public': ['84.11Z', '84.12Z', '84.13Z', '84.30A', '84.30B'],
+  'sante privee': ['86.10Z', '86.21Z', '86.22A', '86.22B', '86.22C', '86.23Z', '86.90A', '86.90B', '86.90D', '86.90E', '86.90F'],
+  energie: ['35.11Z', '35.12Z', '35.13Z', '35.14Z', '35.21Z', '35.22Z', '35.23Z', '35.30Z'],
+  'eau services essentiels': ['36.00Z', '37.00Z', '38.11Z', '38.21Z', '39.00Z'],
+  'grande distribution': ['47.11A', '47.11B', '47.11C', '47.11D', '47.11F', '47.19A'],
+  'tourisme hotellerie': ['55.10Z', '55.20Z', '55.30Z', '55.90Z', '79.11Z', '79.12Z', '79.90Z'],
+  immobilier: ['68.10Z', '68.20A', '68.20B', '68.31Z', '68.32A', '68.32B'],
+  'travaux publics': ['41.20A', '41.20B', '42.11Z', '42.12Z', '42.13A', '42.13B', '42.21Z', '42.22Z', '42.91Z', '42.99Z', '43.11Z', '43.12A', '43.12B'],
+  'education formation': ['85.10Z', '85.20Z', '85.31Z', '85.32Z', '85.41Z', '85.42Z', '85.51Z', '85.52Z', '85.53Z', '85.59A', '85.59B', '85.60Z'],
+  'medias audiovisuel': ['58.13Z', '58.14Z', '59.11A', '59.11B', '59.11C', '59.12Z', '59.13A', '59.13B', '59.14Z', '60.10Z', '60.20A', '60.20B', '63.91Z'],
+  'livres numeriques': ['58.11Z', '58.19Z'],
+};
 const employeeRangeByTranche: Record<string, { min: number; max: number | null }> = {
   '00': { min: 0, max: 0 },
   '01': { min: 1, max: 2 },
@@ -71,6 +93,14 @@ function normalizeText(value: string) {
     .replace(/[\u0300-\u036f]/g, '')
     .trim()
     .toLowerCase();
+}
+
+function getActivityNafCodes(metier?: string) {
+  if (!metier?.trim()) {
+    return [];
+  }
+
+  return activityNafCodeMap[normalizeText(metier)] ?? [];
 }
 
 function matchesCity(company: CompanySearchResult, city?: string) {
@@ -167,9 +197,54 @@ function matchesMetier(company: CompanySearchResult, metier?: string) {
   }
 
   const normalizedMetier = normalizeText(metier);
+  const mappedActivityCodes = getActivityNafCodes(metier);
+  const companyNafCode = company.activite ? normalizeNafCode(company.activite) : null;
+
+  if (mappedActivityCodes.length > 0) {
+    if (companyNafCode && mappedActivityCodes.includes(companyNafCode)) {
+      return true;
+    }
+  }
+
   const candidateValues = [company.nom, company.adresse, company.activite].filter(Boolean) as string[];
 
   return candidateValues.some((value) => normalizeText(value).includes(normalizedMetier));
+}
+
+function matchesCompanySize(company: CompanySearchResult, companySize: CompanySizeFilter = 'tous') {
+  if (companySize === 'tous') {
+    return true;
+  }
+
+  const normalizedCategory = normalizeText(company.categorieEntreprise ?? '');
+  const range =
+    (company.trancheEffectif && employeeRangeByTranche[company.trancheEffectif]) || null;
+
+  if (companySize === 'pme') {
+    if (normalizedCategory === 'ge' || normalizedCategory === 'eti') {
+      return false;
+    }
+
+    if (normalizedCategory === 'pme') {
+      return true;
+    }
+
+    if (!range) {
+      return false;
+    }
+
+    return range.max !== null && range.max <= 249;
+  }
+
+  if (normalizedCategory === 'ge') {
+    return true;
+  }
+
+  if (!range) {
+    return false;
+  }
+
+  return range.min >= 5000;
 }
 
 function matchesRevenue(
@@ -306,7 +381,7 @@ async function fetchSearchPage(params: {
 
 function buildSearchCombos(params: { department?: string; nafCode?: string }) {
   const departments = parseDepartments(params.department);
-  const nafCodes = parseNafCodes(params.nafCode);
+  const nafCodes = Array.from(new Set(parseNafCodes(params.nafCode)));
 
   const departmentValues = departments.length > 0 ? departments : [''];
   const nafValues = nafCodes.length > 0 ? nafCodes : [''];
@@ -334,17 +409,21 @@ export async function searchCompanies(
   maxRevenue?: number,
   minEmployees?: number,
   maxEmployees?: number,
+  companySize: CompanySizeFilter = 'tous',
 ) {
   const cleanedQuery = query?.trim() ?? '';
   const cleanedMetier = metier?.trim() ?? '';
   const cleanedDepartment = department?.trim() ?? '';
   const cleanedNafCode = nafCode?.trim() ?? '';
+  const mappedActivityCodes = getActivityNafCodes(cleanedMetier);
+  const effectiveNafCode = cleanedNafCode || mappedActivityCodes.join(',');
 
   if (!cleanedQuery && !cleanedMetier && !cleanedDepartment && !cleanedNafCode && !city?.trim()) {
     return [];
   }
 
-  const combinedQuery = [cleanedQuery, cleanedMetier, city?.trim() ?? '']
+  const metierQueryTerm = mappedActivityCodes.length > 0 ? '' : cleanedMetier;
+  const combinedQuery = [cleanedQuery, metierQueryTerm, city?.trim() ?? '']
     .filter(Boolean)
     .join(' ')
     .trim();
@@ -353,7 +432,7 @@ export async function searchCompanies(
   const seenSirens = new Set<string>();
   const combos = buildSearchCombos({
     department: cleanedDepartment,
-    nafCode: cleanedNafCode,
+    nafCode: effectiveNafCode,
   });
   let hasSuccessfulRequest = false;
 
@@ -395,10 +474,11 @@ export async function searchCompanies(
     return collectedResults
       .filter((company) => matchesCity(company, city))
       .filter((company) => matchesDepartment(company, department))
-      .filter((company) => matchesNafCode(company, nafCode))
+      .filter((company) => matchesNafCode(company, effectiveNafCode))
       .filter((company) => matchesMetier(company, metier))
       .filter((company) => matchesRevenue(company, minRevenue, maxRevenue))
-      .filter((company) => matchesEmployees(company, minEmployees, maxEmployees));
+      .filter((company) => matchesEmployees(company, minEmployees, maxEmployees))
+      .filter((company) => matchesCompanySize(company, companySize));
   }
 
   {
@@ -411,10 +491,11 @@ export async function searchCompanies(
         matchesQuery &&
         matchesCity(company, city) &&
         matchesDepartment(company, department) &&
-        matchesNafCode(company, nafCode) &&
+        matchesNafCode(company, effectiveNafCode) &&
         matchesMetier(company, metier) &&
         matchesRevenue(company, minRevenue, maxRevenue) &&
-        matchesEmployees(company, minEmployees, maxEmployees)
+        matchesEmployees(company, minEmployees, maxEmployees) &&
+        matchesCompanySize(company, companySize)
       );
     });
   }
