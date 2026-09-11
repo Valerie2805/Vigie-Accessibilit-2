@@ -15,8 +15,8 @@ import {
 import { resolveWebsite } from '../services/website-resolver.js';
 
 const router = Router();
-const WEBSITE_RESOLUTION_TIMEOUT_MS = 4500;
-const EMAIL_RESOLUTION_TIMEOUT_MS = 2500;
+const WEBSITE_RESOLUTION_TIMEOUT_MS = 10000;
+const EMAIL_RESOLUTION_TIMEOUT_MS = 7000;
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string) {
   return Promise.race<T>([
@@ -50,6 +50,7 @@ router.get('/search', async (req, res, next) => {
     department: z.string().optional(),
     metier: z.string().optional(),
     nafCode: z.string().optional(),
+    companySize: z.enum(['tous', 'pme', 'ge']).optional().default('tous'),
     minRevenue: z.coerce.number().nonnegative().optional(),
     maxRevenue: z.coerce.number().nonnegative().optional(),
     minEmployees: z.coerce.number().int().nonnegative().optional(),
@@ -84,6 +85,7 @@ router.get('/search', async (req, res, next) => {
       params.maxRevenue,
       params.minEmployees,
       params.maxEmployees,
+      params.companySize,
     );
 
     const storedCompanies = await upsertCompaniesFromSearch(results);
