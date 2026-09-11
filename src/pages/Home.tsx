@@ -333,6 +333,7 @@ export default function Home() {
   const [enrichProgress, setEnrichProgress] = useState<{ done: number; total: number } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const metier = selectedActivity === 'autre' ? customActivity : selectedActivity;
   const selectedClientPreset = clientSearchPresets.find(
@@ -368,18 +369,33 @@ export default function Home() {
   async function enrichCompanies(targetCompanies: Company[]) {
     const targets = targetCompanies.filter((company) => !company.websiteUrl || !company.email);
     if (targets.length === 0) {
+      setStatusMessage('Toutes les entreprises selectionnees ont deja un site et un email.');
       return;
     }
 
     setEnriching(true);
     setEnrichProgress({ done: 0, total: targets.length });
     setError(null);
+    setStatusMessage(null);
     let failureCount = 0;
+    let websiteFoundCount = 0;
+    let emailFoundCount = 0;
+    let noResultCount = 0;
 
     try {
       for (const [index, company] of targets.entries()) {
         try {
           const response = await resolveWebsite(company.siren, company.websiteUrl ?? undefined);
+          if (!company.websiteUrl && response.company.websiteUrl) {
+            websiteFoundCount += 1;
+          }
+          if (!company.email && response.company.email) {
+            emailFoundCount += 1;
+          }
+          if (!response.company.websiteUrl && !response.company.email) {
+            noResultCount += 1;
+          }
+
           const updatedCompany = {
             ...company,
             websiteUrl: response.company.websiteUrl,
@@ -415,6 +431,28 @@ export default function Home() {
             failureCount > 1 ? 's' : ''
           } pour le moment. Clique de nouveau sur "Completer les sites" pour relancer les recherches restantes.`,
         );
+      } else if (websiteFoundCount === 0 && emailFoundCount === 0) {
+        setStatusMessage(
+          `Recherche terminee, mais aucun site ni email n'a ete trouve automatiquement sur ${targets.length} entreprise${
+            targets.length > 1 ? 's' : ''
+          }.`,
+        );
+      } else {
+        const messageParts: string[] = [];
+
+        if (websiteFoundCount > 0) {
+          messageParts.push(`${websiteFoundCount} site${websiteFoundCount > 1 ? 's' : ''} trouve${websiteFoundCount > 1 ? 's' : ''}`);
+        }
+
+        if (emailFoundCount > 0) {
+          messageParts.push(`${emailFoundCount} email${emailFoundCount > 1 ? 's' : ''} trouve${emailFoundCount > 1 ? 's' : ''}`);
+        }
+
+        if (noResultCount > 0) {
+          messageParts.push(`${noResultCount} sans resultat automatique`);
+        }
+
+        setStatusMessage(`Recherche terminee : ${messageParts.join(', ')}.`);
       }
     } finally {
       setEnriching(false);
@@ -426,6 +464,7 @@ export default function Home() {
     event.preventDefault();
     setLoading(true);
     setError(null);
+    setStatusMessage(null);
 
     try {
       const response = await searchCompanies(
@@ -868,6 +907,12 @@ export default function Home() {
           {error ? (
             <div className="mt-5 rounded-2xl border border-rose-300/20 bg-rose-300/10 px-4 py-3 text-sm text-rose-100">
               {error}
+            </div>
+          ) : null}
+
+          {!error && statusMessage ? (
+            <div className="mt-5 rounded-2xl border border-moss/20 bg-moss/10 px-4 py-3 text-sm text-moss">
+              {statusMessage}
             </div>
           ) : null}
         </form>

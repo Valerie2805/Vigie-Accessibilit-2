@@ -25,6 +25,8 @@ type SearchCandidate = {
   snippet: string;
 };
 
+type SearchProvider = 'duckduckgo' | 'bing';
+
 const ignoredHosts = [
   'annuaire-entreprises.data.gouv.fr',
   'annuaire-entreprises.gouv.fr',
@@ -95,7 +97,29 @@ function parseSearchResultUrl(rawUrl: string) {
   try {
     const parsed = new URL(rawUrl, 'https://duckduckgo.com');
     const redirected = parsed.searchParams.get('uddg');
-    return redirected ? decodeURIComponent(redirected) : parsed.toString();
+    if (redirected) {
+      return decodeURIComponent(redirected);
+    }
+
+    if (parsed.hostname.endsWith('bing.com') && parsed.pathname.startsWith('/ck/a')) {
+      const encodedTarget = parsed.searchParams.get('u');
+      if (encodedTarget) {
+        const normalizedTarget = encodedTarget.startsWith('a1')
+          ? encodedTarget.slice(2)
+          : encodedTarget;
+
+        try {
+          const decodedTarget = Buffer.from(normalizedTarget, 'base64').toString('utf-8');
+          if (decodedTarget.startsWith('http://') || decodedTarget.startsWith('https://')) {
+            return decodedTarget;
+          }
+        } catch {
+          // Ignore invalid Bing redirect payloads.
+        }
+      }
+    }
+
+    return parsed.toString();
   } catch {
     return rawUrl;
   }
@@ -117,7 +141,7 @@ function toWebsiteRoot(url: string) {
   }
 }
 
-function extractSearchCandidates(html: string) {
+function extractDuckDuckGoSearchCandidates(html: string) {
   const $ = cheerio.load(html);
   const results: SearchCandidate[] = [];
 
@@ -145,6 +169,47 @@ function extractSearchCandidates(html: string) {
   return results;
 }
 
+function extractBingSearchCandidates(html: string) {
+  const $ = cheerio.load(html);
+  const results: SearchCandidate[] = [];
+
+  $('li.b_algo').slice(0, 10).each((_, element) => {
+    const link = $(element).find('h2 a').first();
+    const href = link.attr('href');
+    const title = link.text().trim();
+    const snippet =
+      $(element).find('.b_caption p, .b_snippet, p').first().text().trim() ?? '';
+
+    if (!href || !title) {
+      return;
+    }
+
+    results.push({
+      url: parseSearchResultUrl(href),
+      title,
+      snippet,
+    });
+  });
+
+  return results;
+}
+
+function extractSearchCandidates(html: string, provider: SearchProvider) {
+  const extracted =
+    provider === 'bing'
+      ? extractBingSearchCandidates(html)
+      : extractDuckDuckGoSearchCandidates(html);
+
+  return Array.from(
+    new Map(
+      extracted.map((candidate) => [
+        `${candidate.url}::${candidate.title}`,
+        candidate,
+      ]),
+    ).values(),
+  );
+}
+
 function buildSearchQueries(company: CompanySearchResult) {
   return [
     [company.nom, company.ville, company.codePostal].filter(Boolean).join(' '),
@@ -155,27 +220,52 @@ function buildSearchQueries(company: CompanySearchResult) {
 
 async function searchWebCandidates(company: CompanySearchResult) {
   const candidates: SearchCandidate[] = [];
+  const providers: Array<{ name: SearchProvider; buildUrl: (query: string) => URL }> = [
+    {
+      name: 'duckduckgo',
+      buildUrl: (query) => {
+        const url = new URL('https://html.duckduckgo.com/html/');
+        url.searchParams.set('q', query);
+        return url;
+      },
+    },
+    {
+      name: 'bing',
+      buildUrl: (query) => {
+        const url = new URL('https://www.bing.com/search');
+        url.searchParams.set('q', query);
+        url.searchParams.set('cc', 'fr');
+        url.searchParams.set('setlang', 'fr');
+        return url;
+      },
+    },
+  ];
 
   for (const query of buildSearchQueries(company)) {
-    const url = new URL('https://html.duckduckgo.com/html/');
-    url.searchParams.set('q', query);
+    for (const provider of providers) {
+      try {
+        const response = await fetch(provider.buildUrl(query), {
+          headers: {
+            'User-Agent': 'TraeAccessibilityMvp/0.1',
+            accept: 'text/html,application/xhtml+xml',
+          },
+          signal: AbortSignal.timeout(8000),
+        });
 
-    try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'TraeAccessibilityMvp/0.1',
-        },
-        signal: AbortSignal.timeout(8000),
-      });
+        if (!response.ok) {
+          continue;
+        }
 
-      if (!response.ok) {
+        const html = await response.text();
+        const providerCandidates = extractSearchCandidates(html, provider.name);
+        candidates.push(...providerCandidates);
+      } catch {
         continue;
       }
 
-      const html = await response.text();
-      candidates.push(...extractSearchCandidates(html));
-    } catch {
-      continue;
+      if (candidates.length >= 5) {
+        break;
+      }
     }
 
     if (candidates.length >= 5) {
@@ -183,7 +273,9 @@ async function searchWebCandidates(company: CompanySearchResult) {
     }
   }
 
-  return candidates;
+  return Array.from(
+    new Map(candidates.map((candidate) => [candidate.url, candidate])).values(),
+  );
 }
 
 function scoreCandidate(company: CompanySearchResult, candidate: SearchCandidate) {
