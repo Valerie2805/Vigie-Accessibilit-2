@@ -330,6 +330,7 @@ export default function Home() {
   const [selectedSirens, setSelectedSirens] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [enriching, setEnriching] = useState(false);
+  const [enrichProgress, setEnrichProgress] = useState<{ done: number; total: number } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -371,11 +372,12 @@ export default function Home() {
     }
 
     setEnriching(true);
+    setEnrichProgress({ done: 0, total: targets.length });
     setError(null);
     let failureCount = 0;
 
     try {
-      for (const company of targets) {
+      for (const [index, company] of targets.entries()) {
         try {
           const response = await resolveWebsite(company.siren, company.websiteUrl ?? undefined);
           const updatedCompany = {
@@ -399,6 +401,11 @@ export default function Home() {
           saveRecentCompaniesToBrowser([updatedCompany]);
         } catch {
           failureCount += 1;
+        } finally {
+          setEnrichProgress({
+            done: index + 1,
+            total: targets.length,
+          });
         }
       }
 
@@ -411,6 +418,7 @@ export default function Home() {
       }
     } finally {
       setEnriching(false);
+      setEnrichProgress(null);
     }
   }
 
@@ -447,7 +455,7 @@ export default function Home() {
   }
 
   async function handleEnrichWebsites() {
-    await enrichCompanies(results);
+    await enrichCompanies(selectedResults.length > 0 ? selectedResults : results);
   }
 
   async function handleExportCsv() {
@@ -986,7 +994,11 @@ export default function Home() {
               className="inline-flex h-10 items-center gap-2 rounded-full border border-moss/40 bg-moss/10 px-4 text-sm text-moss transition hover:border-moss hover:bg-moss hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
             >
               {enriching ? <Spinner className="text-moss" /> : <Globe className="h-4 w-4" />}
-              Completer les sites
+              {enriching && enrichProgress
+                ? `Completer les sites (${enrichProgress.done}/${enrichProgress.total})`
+                : selectedResults.length > 0
+                  ? 'Completer les sites selectionnes'
+                  : 'Completer les sites'}
             </button>
           </div>
         </div>

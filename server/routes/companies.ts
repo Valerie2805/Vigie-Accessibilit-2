@@ -15,6 +15,17 @@ import {
 import { resolveWebsite } from '../services/website-resolver.js';
 
 const router = Router();
+const WEBSITE_RESOLUTION_TIMEOUT_MS = 4500;
+const EMAIL_RESOLUTION_TIMEOUT_MS = 2500;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string) {
+  return Promise.race<T>([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+    }),
+  ]);
+}
 
 async function getLatestScanIndex() {
   const bySiren = new Map<string, { status: string; scannedAt: string }>();
@@ -191,7 +202,32 @@ router.post('/resolve-website', async (req, res, next) => {
       return;
     }
 
-    const resolution = await resolveWebsite(company, body.manualWebsite || undefined);
+    let resolution;
+    try {
+      resolution = await withTimeout(
+        resolveWebsite(company, body.manualWebsite || undefined),
+        WEBSITE_RESOLUTION_TIMEOUT_MS,
+        'La recherche du site a pris trop de temps',
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === 'La recherche du site a pris trop de temps'
+      ) {
+        resolution = {
+          websiteUrl: null,
+          source: 'inconnue' as const,
+          confidence: 'faible' as const,
+          websiteRedesignYear: null,
+          notes: [
+            'La recherche automatique du site a ete interrompue pour repondre plus vite.',
+          ],
+        };
+      } else {
+        throw error;
+      }
+    }
+
     await upsertCompaniesFromSearch([company]);
     await setCompanyWebsite(company.siren, resolution);
     const stored = await getCompanyFromStorage(company.siren);
@@ -200,14 +236,26 @@ router.post('/resolve-website', async (req, res, next) => {
     let emailSource: 'site' | 'snov' | 'inconnue' = 'inconnue';
 
     if (resolution.websiteUrl) {
-      const contacts = await resolveCompanyEmail(resolution.websiteUrl);
-      emailNotes = contacts.notes;
-      emailSource = contacts.source;
-      const existingEmail = stored?.email ?? null;
-      if (contacts.email && contacts.email !== existingEmail) {
-        await setCompanyEmail(company.siren, contacts.email, contacts.source, contacts.notes);
-      } else if (!existingEmail && contacts.email) {
-        await setCompanyEmail(company.siren, contacts.email, contacts.source, contacts.notes);
+      try {
+        const contacts = await withTimeout(
+          resolveCompanyEmail(resolution.websiteUrl),
+          EMAIL_RESOLUTION_TIMEOUT_MS,
+          "La recherche d'email a pris trop de temps",
+        );
+        emailNotes = contacts.notes;
+        emailSource = contacts.source;
+        const existingEmail = stored?.email ?? null;
+        if (contacts.email && contacts.email !== existingEmail) {
+          await setCompanyEmail(company.siren, contacts.email, contacts.source, contacts.notes);
+        } else if (!existingEmail && contacts.email) {
+          await setCompanyEmail(company.siren, contacts.email, contacts.source, contacts.notes);
+        }
+      } catch (error) {
+        emailNotes = [
+          error instanceof Error && error.message === "La recherche d'email a pris trop de temps"
+            ? "La recherche d'email a ete interrompue pour repondre plus vite."
+            : "La recherche d'email a echoue sur cette tentative.",
+        ];
       }
     }
 
