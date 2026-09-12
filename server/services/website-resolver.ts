@@ -26,6 +26,10 @@ type SearchCandidate = {
 };
 
 type SearchProvider = 'duckduckgo' | 'bing';
+type CandidateValidation = {
+  websiteUrl: string | null;
+  score: number;
+};
 
 const ignoredHosts = [
   'annuaire-entreprises.data.gouv.fr',
@@ -103,7 +107,25 @@ const genericTokens = new Set([
   'agence',
   'holding',
 ]);
+const ignoredSlugTokens = new Set([
+  'france',
+  'groupe',
+  'group',
+  'societe',
+  'entreprise',
+  'entreprises',
+  'services',
+  'service',
+  'sas',
+  'sasu',
+  'sarl',
+  'sa',
+  'eurl',
+  'sci',
+]);
 const minimumRelevantYear = 2000;
+const likelyDirectoryPattern =
+  /\b(annuaire|fiche entreprise|societe|siret|siren|pages jaunes|telephone|tel\.?|horaires|avis|reservation|booking|tripadvisor|comparateur|itineraire)\b/i;
 
 function normalizeText(value: string) {
   return value
@@ -117,6 +139,41 @@ function tokenizeCompanyName(companyName: string) {
     .split(/[^a-z0-9]+/g)
     .filter((token) => token.length >= 3)
     .filter((token) => !genericTokens.has(token));
+}
+
+function countTokenMatches(tokens: string[], text: string) {
+  return tokens.filter((token) => text.includes(token)).length;
+}
+
+function buildCompanyNameSlugs(companyName: string) {
+  const words = normalizeText(companyName)
+    .split(/[^a-z0-9]+/g)
+    .filter(Boolean);
+
+  const compactWords = words.filter((word) => !ignoredSlugTokens.has(word));
+  const significantTokens = tokenizeCompanyName(companyName);
+  const slugs = new Set<string>();
+
+  const fullSlug = words.join('');
+  if (fullSlug.length >= 4) {
+    slugs.add(fullSlug);
+  }
+
+  const compactSlug = compactWords.join('');
+  if (compactSlug.length >= 4) {
+    slugs.add(compactSlug);
+  }
+
+  const significantSlug = significantTokens.join('');
+  if (significantSlug.length >= 4) {
+    slugs.add(significantSlug);
+  }
+
+  if (compactWords.length >= 2) {
+    slugs.add(compactWords.slice(-2).join(''));
+  }
+
+  return Array.from(slugs).filter((slug) => slug.length >= 4);
 }
 
 function isIgnoredHost(host: string) {
@@ -359,12 +416,14 @@ async function resolveWithWebSearch(company: CompanySearchResult) {
     .filter((entry) => entry.score >= 3)
     .sort((a, b) => b.score - a.score);
 
-  const best = ranked[0]?.candidate;
-  if (!best) {
-    return null;
+  for (const entry of ranked.slice(0, 5)) {
+    const validated = await validateCandidateWebsite(company, entry.candidate, entry.score);
+    if (validated.websiteUrl) {
+      return validated.websiteUrl;
+    }
   }
 
-  return toWebsiteRoot(best.url) ?? normalizeWebsite(best.url);
+  return null;
 }
 
 async function resolveWithGooglePlaces(company: CompanySearchResult) {
@@ -414,6 +473,137 @@ function normalizeWebsite(url: string) {
   } catch {
     return url.trim();
   }
+}
+
+async function validateCandidateWebsite(
+  company: CompanySearchResult,
+  candidate: SearchCandidate,
+  baseScore: number,
+): Promise<CandidateValidation> {
+  const candidateRoot = toWebsiteRoot(candidate.url);
+  if (!candidateRoot) {
+    return { websiteUrl: null, score: -100 };
+  }
+
+  try {
+    const response = await fetch(candidateRoot, {
+      headers: {
+        'User-Agent': 'TraeAccessibilityMvp/0.1',
+        accept: 'text/html,application/xhtml+xml',
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      return { websiteUrl: null, score: -100 };
+    }
+
+    const finalUrl = toWebsiteRoot(response.url || candidateRoot) ?? candidateRoot;
+    const finalHost = new URL(finalUrl).host.toLowerCase();
+    if (isIgnoredHost(finalHost)) {
+      return { websiteUrl: null, score: -100 };
+    }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('html')) {
+      return { websiteUrl: null, score: -100 };
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+    const normalizedTitle = normalizeText($('title').text());
+    const normalizedMeta = normalizeText(
+      [
+        $('meta[property="og:site_name"]').attr('content') ?? '',
+        $('meta[name="application-name"]').attr('content') ?? '',
+        $('meta[name="description"]').attr('content') ?? '',
+      ].join(' '),
+    );
+    const normalizedBody = normalizeText($('body').text().slice(0, 6000));
+    const normalizedCombined = `${normalizedTitle} ${normalizedMeta} ${normalizedBody}`.trim();
+    const normalizedCompanyName = normalizeText(company.nom);
+    const tokens = tokenizeCompanyName(company.nom);
+    const companySlugs = buildCompanyNameSlugs(company.nom);
+    const hostMatchCount = countTokenMatches(tokens, normalizeText(finalHost));
+    const bodyMatchCount = countTokenMatches(tokens, normalizedCombined);
+    const compactHost = normalizeText(finalHost).replace(/[^a-z0-9]/g, '');
+    const compactCombined = normalizedCombined.replace(/[^a-z0-9]/g, '');
+    const slugMatchCount = companySlugs.filter(
+      (slug) => compactHost.includes(slug) || compactCombined.includes(slug),
+    ).length;
+
+    let score = baseScore;
+
+    if (normalizedCombined.includes(normalizedCompanyName)) {
+      score += 8;
+    }
+
+    score += hostMatchCount * 4;
+    score += Math.min(bodyMatchCount, 4) * 2;
+    score += slugMatchCount * 5;
+
+    const normalizedCity = company.ville ? normalizeText(company.ville) : '';
+    if (normalizedCity && normalizedCombined.includes(normalizedCity)) {
+      score += 2;
+    }
+
+    if (/contact|mentions legales|qui sommes nous|accueil|site officiel/.test(normalizedCombined)) {
+      score += 1;
+    }
+
+    if (likelyDirectoryPattern.test(normalizedCombined)) {
+      score -= 6;
+    }
+
+    const minimumBodyMatches = tokens.length >= 2 ? 2 : 1;
+    const hasStrongMatch =
+      hostMatchCount >= 1 ||
+      slugMatchCount >= 1 ||
+      normalizedCombined.includes(normalizedCompanyName) ||
+      bodyMatchCount >= minimumBodyMatches;
+
+    if (!hasStrongMatch || score < 6) {
+      return { websiteUrl: null, score };
+    }
+
+    return {
+      websiteUrl: finalUrl,
+      score,
+    };
+  } catch {
+    return { websiteUrl: null, score: -100 };
+  }
+}
+
+function buildWebsiteGuesses(company: CompanySearchResult) {
+  const guesses: string[] = [];
+  const slugs = buildCompanyNameSlugs(company.nom).slice(0, 5);
+  const tlds = ['fr', 'com'];
+
+  for (const slug of slugs) {
+    for (const tld of tlds) {
+      guesses.push(`https://www.${slug}.${tld}`);
+      guesses.push(`https://${slug}.${tld}`);
+    }
+  }
+
+  return Array.from(new Set(guesses));
+}
+
+async function resolveWithGuessedDomains(company: CompanySearchResult) {
+  for (const guessedUrl of buildWebsiteGuesses(company)) {
+    const validated = await validateCandidateWebsite(
+      company,
+      { url: guessedUrl, title: '', snippet: '' },
+      0,
+    );
+    if (validated.websiteUrl) {
+      return validated.websiteUrl;
+    }
+  }
+
+  return null;
 }
 
 function isValidRelevantYear(year: number) {
@@ -643,6 +833,21 @@ export async function resolveWebsite(
       websiteRedesignYear: null,
       notes: ['La resolution automatique du site a echoue'],
     };
+  }
+
+  try {
+    const guessedWebsite = await resolveWithGuessedDomains(company);
+    if (guessedWebsite) {
+      return attachWebsiteInsights({
+        websiteUrl: guessedWebsite,
+        source: 'recherche_web',
+        confidence: 'faible',
+        websiteRedesignYear: null,
+        notes: ['Site resolu via domaine probable verifie automatiquement'],
+      });
+    }
+  } catch {
+    // Ignore guessed-domain failures and fall through.
   }
 
   return {
