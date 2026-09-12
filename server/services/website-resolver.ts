@@ -150,9 +150,14 @@ function buildCompanyNameSlugs(companyName: string) {
     .split(/[^a-z0-9]+/g)
     .filter(Boolean);
 
+  const compactLetters = normalizeText(companyName).replace(/[^a-z0-9]/g, '');
   const compactWords = words.filter((word) => !ignoredSlugTokens.has(word));
   const significantTokens = tokenizeCompanyName(companyName);
   const slugs = new Set<string>();
+
+  if (compactLetters.length >= 4) {
+    slugs.add(compactLetters);
+  }
 
   const fullSlug = words.join('');
   if (fullSlug.length >= 4) {
@@ -171,6 +176,18 @@ function buildCompanyNameSlugs(companyName: string) {
 
   if (compactWords.length >= 2) {
     slugs.add(compactWords.slice(-2).join(''));
+  }
+
+  if (compactWords.length >= 1 && compactWords[0].length <= 4) {
+    slugs.add(`${compactWords[0]}groupe`);
+  }
+
+  const hotelWord = compactWords.find((word) => word === 'hotel' || word === 'hotels');
+  const initials = words.filter((word) => word.length === 1).join('');
+  if (hotelWord && initials.length >= 2) {
+    slugs.add(`${hotelWord}${initials}`);
+    slugs.add(`${initials}${hotelWord}`);
+    slugs.add(`${initials}${hotelWord}s`);
   }
 
   return Array.from(slugs).filter((slug) => slug.length >= 4);
@@ -579,12 +596,16 @@ async function validateCandidateWebsite(
 function buildWebsiteGuesses(company: CompanySearchResult) {
   const guesses: string[] = [];
   const slugs = buildCompanyNameSlugs(company.nom).slice(0, 5);
-  const tlds = ['fr', 'com'];
+  const tlds = ['fr', 'com', 'eu'];
 
   for (const slug of slugs) {
     for (const tld of tlds) {
       guesses.push(`https://www.${slug}.${tld}`);
       guesses.push(`https://${slug}.${tld}`);
+      guesses.push(`https://www.${slug}-groupe.${tld}`);
+      guesses.push(`https://${slug}-groupe.${tld}`);
+      guesses.push(`https://www.groupe-${slug}.${tld}`);
+      guesses.push(`https://groupe-${slug}.${tld}`);
     }
   }
 
@@ -815,6 +836,21 @@ export async function resolveWebsite(
   }
 
   try {
+    const guessedWebsite = await resolveWithGuessedDomains(company);
+    if (guessedWebsite) {
+      return attachWebsiteInsights({
+        websiteUrl: guessedWebsite,
+        source: 'recherche_web',
+        confidence: 'moyenne',
+        websiteRedesignYear: null,
+        notes: ['Site resolu via domaine probable verifie automatiquement'],
+      });
+    }
+  } catch {
+    // Ignore guessed-domain failures and continue with web search fallback.
+  }
+
+  try {
     const webSearchWebsite = await resolveWithWebSearch(company);
     if (webSearchWebsite) {
       return attachWebsiteInsights({
@@ -833,21 +869,6 @@ export async function resolveWebsite(
       websiteRedesignYear: null,
       notes: ['La resolution automatique du site a echoue'],
     };
-  }
-
-  try {
-    const guessedWebsite = await resolveWithGuessedDomains(company);
-    if (guessedWebsite) {
-      return attachWebsiteInsights({
-        websiteUrl: guessedWebsite,
-        source: 'recherche_web',
-        confidence: 'faible',
-        websiteRedesignYear: null,
-        notes: ['Site resolu via domaine probable verifie automatiquement'],
-      });
-    }
-  } catch {
-    // Ignore guessed-domain failures and fall through.
   }
 
   return {

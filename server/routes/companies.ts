@@ -15,8 +15,8 @@ import {
 import { resolveWebsite } from '../services/website-resolver.js';
 
 const router = Router();
-const WEBSITE_RESOLUTION_TIMEOUT_MS = 10000;
-const EMAIL_RESOLUTION_TIMEOUT_MS = 7000;
+const WEBSITE_RESOLUTION_TIMEOUT_MS = 18000;
+const EMAIL_RESOLUTION_TIMEOUT_MS = 12000;
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string) {
   return Promise.race<T>([
