@@ -21,50 +21,68 @@ type PlaceDetailsResponse = {
 
 const minimumRelevantYear = 2000;
 
+function buildGooglePlacesQueries(company: CompanySearchResult) {
+  const queries = [
+    [company.nom, company.ville, company.codePostal].filter(Boolean).join(' '),
+    [company.nom, company.ville].filter(Boolean).join(' '),
+    [company.nom, company.codePostal].filter(Boolean).join(' '),
+    company.nom,
+  ]
+    .map((value) => value?.trim() ?? '')
+    .filter(Boolean);
+
+  return Array.from(new Set(queries));
+}
+
 async function resolveWithGooglePlaces(company: CompanySearchResult) {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   if (!apiKey) {
     return null;
   }
 
-  const query = [company.nom, company.ville, company.codePostal].filter(Boolean).join(' ');
-  const findPlaceUrl = new URL('https://maps.googleapis.com/maps/api/place/findplacefromtext/json');
-  findPlaceUrl.searchParams.set('input', query);
-  findPlaceUrl.searchParams.set('inputtype', 'textquery');
-  findPlaceUrl.searchParams.set('fields', 'place_id,name,formatted_address');
-  findPlaceUrl.searchParams.set('key', apiKey);
+  for (const query of buildGooglePlacesQueries(company)) {
+    const findPlaceUrl = new URL('https://maps.googleapis.com/maps/api/place/findplacefromtext/json');
+    findPlaceUrl.searchParams.set('input', query);
+    findPlaceUrl.searchParams.set('inputtype', 'textquery');
+    findPlaceUrl.searchParams.set('fields', 'place_id,name,formatted_address');
+    findPlaceUrl.searchParams.set('key', apiKey);
 
-  const placeResponse = await fetch(findPlaceUrl);
-  if (!placeResponse.ok) {
-    return null;
+    const placeResponse = await fetch(findPlaceUrl);
+    if (!placeResponse.ok) {
+      continue;
+    }
+
+    const placePayload = (await placeResponse.json()) as FindPlaceResponse;
+    if (placePayload.status && placePayload.status !== 'OK') {
+      continue;
+    }
+
+    const placeId = placePayload.candidates?.[0]?.place_id;
+    if (!placeId) {
+      continue;
+    }
+
+    const detailsUrl = new URL('https://maps.googleapis.com/maps/api/place/details/json');
+    detailsUrl.searchParams.set('place_id', placeId);
+    detailsUrl.searchParams.set('fields', 'website,url,name');
+    detailsUrl.searchParams.set('key', apiKey);
+
+    const detailsResponse = await fetch(detailsUrl);
+    if (!detailsResponse.ok) {
+      continue;
+    }
+
+    const detailsPayload = (await detailsResponse.json()) as PlaceDetailsResponse;
+    if (detailsPayload.status && detailsPayload.status !== 'OK') {
+      continue;
+    }
+
+    if (detailsPayload.result?.website) {
+      return normalizeWebsite(detailsPayload.result.website);
+    }
   }
 
-  const placePayload = (await placeResponse.json()) as FindPlaceResponse;
-  if (placePayload.status && placePayload.status !== 'OK') {
-    return null;
-  }
-
-  const placeId = placePayload.candidates?.[0]?.place_id;
-  if (!placeId) {
-    return null;
-  }
-
-  const detailsUrl = new URL('https://maps.googleapis.com/maps/api/place/details/json');
-  detailsUrl.searchParams.set('place_id', placeId);
-  detailsUrl.searchParams.set('fields', 'website,url,name');
-  detailsUrl.searchParams.set('key', apiKey);
-
-  const detailsResponse = await fetch(detailsUrl);
-  if (!detailsResponse.ok) {
-    return null;
-  }
-
-  const detailsPayload = (await detailsResponse.json()) as PlaceDetailsResponse;
-  if (detailsPayload.status && detailsPayload.status !== 'OK') {
-    return null;
-  }
-
-  return detailsPayload.result?.website ? normalizeWebsite(detailsPayload.result.website) : null;
+  return null;
 }
 
 function normalizeWebsite(url: string) {
@@ -279,7 +297,7 @@ export async function resolveWebsite(
         source: 'google_places',
         confidence: 'haute',
         websiteRedesignYear: null,
-        notes: ['Site resolu via Google Places API'],
+        notes: ['Site resolu via Google Places API avec requetes progressives'],
       });
     }
   } catch {
